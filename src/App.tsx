@@ -1,42 +1,238 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ChevronRight, Clock3, Mic, Pause, Play, Plus, RotateCcw, Search, Trash2, Volume2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { parseManifest } from './domain/parser';
+import { buildItems, assessAll } from './domain/workflow';
+import type { Channel, Delivery, ReviewRecord } from './domain/types';
+import { loadState, saveState, clearState, type LensState } from './storage/store';
+import { canExport, exportBlockedReason, buildMarkdown, downloadMarkdown } from './report/markdown';
+import ManifestPanel from './components/ManifestPanel';
+import ResultsList from './components/ResultsList';
+import ItemDetail from './components/ItemDetail';
+import { Ban, Download, Scale, ShieldCheck } from 'lucide-react';
 
-type Phrase = { id: number; text: string; translation: string; tag: string; level: '入门'|'进阶'|'挑战'; status: 'new'|'practice'|'mastered'; attempts: number; last?: string };
-const seed: Phrase[] = [
-  { id: 1, text: 'The morning light feels different today.', translation: '今天的晨光感觉不一样。', tag: '日常', level: '入门', status: 'practice', attempts: 3, last: '今天 09:24' },
-  { id: 2, text: 'Could you walk me through the next step?', translation: '你能带我了解下一步吗？', tag: '工作', level: '进阶', status: 'new', attempts: 0 },
-  { id: 3, text: 'I appreciate your patience and thoughtful feedback.', translation: '感谢你的耐心和细致反馈。', tag: '表达', level: '挑战', status: 'mastered', attempts: 8, last: '昨天 18:10' },
-  { id: 4, text: 'Let’s make room for a little curiosity.', translation: '给好奇心留一点空间。', tag: '灵感', level: '入门', status: 'new', attempts: 0 },
-];
-const bars = Array.from({ length: 68 }, (_, i) => 18 + ((i * 29) % 44));
+export const SEED_MANIFEST = [
+  'react@18.3.1 MIT',
+  'lodash@4.17.21 MIT',
+  'sharp@0.33.4 Apache-2.0',
+  'axios@1.7.2 MIT',
+  'zod@3.23.8 MIT',
+  'ui-kit@3.0.0 MIT',
+  'font-awesome@6.5.2 CC-BY-4.0',
+  'some-proprietary@1.0.0 Proprietary',
+  'legacy-gpl@2.4.0 GPL-3.0',
+  'libfoo@2.0.0 MIT',
+].join('\n');
+
+function initialState(): LensState {
+  const loaded = loadState();
+  if (loaded.manifestText || loaded.items.length > 0) return loaded;
+  // 首次打开：载入示例并立即给出逐项结论
+  const items = buildItems(parseManifest(SEED_MANIFEST).entries, 'npm', Date.now());
+  return {
+    manifestText: SEED_MANIFEST,
+    channel: 'npm',
+    delivery: 'proprietary-distribution',
+    items,
+    reviews: {},
+    updatedAt: '',
+  };
+}
 
 export default function App() {
-  const [phrases, setPhrases] = useState<Phrase[]>(() => { try { return JSON.parse(localStorage.getItem('sound-lab-phrases') || '') || seed; } catch { return seed; } });
-  const [selected, setSelected] = useState(phrases[0]?.id ?? 1);
-  const [filter, setFilter] = useState('全部');
+  const [state, setState] = useState<LensState>(initialState);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [filter, setFilter] = useState<'all' | 'pass' | 'review' | 'blocked'>('all');
   const [query, setQuery] = useState('');
-  const [recording, setRecording] = useState(false);
-  const [playing, setPlaying] = useState(false);
-  const [recorded, setRecorded] = useState(false);
-  const [seconds, setSeconds] = useState(0);
-  const [showAdd, setShowAdd] = useState(false);
-  const [newText, setNewText] = useState('');
-  const timer = useRef<number | undefined>(undefined);
-  const current = phrases.find(p => p.id === selected) ?? phrases[0];
-  const filtered = useMemo(() => phrases.filter(p => (filter === '全部' || p.tag === filter || p.level === filter || (filter === '待练' && p.status !== 'mastered')) && p.text.toLowerCase().includes(query.toLowerCase())), [phrases, filter, query]);
-  const tags = ['全部', ...Array.from(new Set(phrases.map(p => p.tag)))];
-  useEffect(() => { localStorage.setItem('sound-lab-phrases', JSON.stringify(phrases)); }, [phrases]);
-  useEffect(() => () => window.clearInterval(timer.current), []);
-  const startRecord = () => { if (recording) { setRecording(false); window.clearInterval(timer.current); setRecorded(true); setPhrases(ps => ps.map(p => p.id === selected ? {...p, attempts: p.attempts + 1, status: 'practice', last: '刚刚'} : p)); return; } setSeconds(0); setRecording(true); timer.current = window.setInterval(() => setSeconds(s => s + 1), 1000); };
-  const addPhrase = () => { if (!newText.trim()) return; const id = Date.now(); setPhrases(ps => [...ps, { id, text: newText.trim(), translation: '待补充译文', tag: '自定义', level: '入门', status: 'new', attempts: 0 }]); setSelected(id); setNewText(''); setShowAdd(false); };
-  const removePhrase = () => { if (!current) return; setPhrases(ps => ps.filter(p => p.id !== current.id)); setSelected(filtered.find(p => p.id !== current.id)?.id ?? phrases.find(p => p.id !== current.id)?.id ?? 0); };
-  return <div className="app-shell">
-    <aside className="sidebar"><div className="brand"><div className="brand-mark"><Volume2 size={19}/></div><div><strong>声线练习室</strong><span>Pronounce / practice</span></div></div><div className="side-label">我的练习</div><nav><button className="side-link active"><Mic size={17}/>练习库 <b>{phrases.length}</b></button><button className="side-link"><Clock3 size={17}/>练习记录</button><button className="side-link"><Check size={17}/>已掌握 <b>{phrases.filter(p => p.status === 'mastered').length}</b></button></nav><div className="sidebar-foot"><div className="streak"><span>连续练习</span><strong>5 <small>天</small></strong><i>↗ +2</i></div><div className="profile"><div className="avatar">YL</div><div><strong>Yuki Lin</strong><span>普通计划</span></div><ChevronRight size={16}/></div></div></aside>
-    <main className="main"><header className="topbar"><div><p className="eyebrow">WEDNESDAY, SEP 12</p><h1>今天练什么？</h1></div><div className="top-actions"><div className="search"><Search size={16}/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索句子"/></div><button className="primary" onClick={() => setShowAdd(true)}><Plus size={17}/>添加句子</button></div></header>
-      <section className="stats"><div><span>本周完成</span><strong>12 <em>/ 20</em></strong><div className="progress"><i style={{width:'60%'}}/></div></div><div><span>练习时长</span><strong>38 <em>分钟</em></strong><small>比上周多 8 分钟</small></div><div><span>最佳发音</span><strong>92 <em>分</em></strong><small className="green">↑ 6 分</small></div></section>
-      <div className="content-grid"><section className="library"><div className="section-head"><div><h2>句子库</h2><p>选择一句开始你的声音训练</p></div><button className="ghost" onClick={() => setFilter('待练')}>只看待练</button></div><div className="filters">{tags.map(t => <button key={t} className={filter === t ? 'chip active' : 'chip'} onClick={() => setFilter(t)}>{t}</button>)}</div><div className="phrase-list">{filtered.map(p => <button key={p.id} onClick={() => {setSelected(p.id); setRecorded(false)}} className={p.id === selected ? 'phrase selected' : 'phrase'}><div className="phrase-icon">{p.status === 'mastered' ? <Check size={15}/> : <Mic size={15}/>}</div><div className="phrase-copy"><strong>{p.text}</strong><span>{p.translation}</span><div className="phrase-meta"><i>{p.tag}</i><i>{p.level}</i>{p.attempts > 0 && <small>{p.attempts} 次练习</small>}</div></div><ChevronRight size={17}/></button>)}{filtered.length === 0 && <div className="empty">没有找到匹配句子</div>}</div></section>
-        {current && <section className="practice"><div className="practice-head"><div><span className="label">CURRENT PHRASE</span><h2>跟着感觉读</h2></div><button className="icon-btn" onClick={removePhrase} title="删除句子"><Trash2 size={17}/></button></div><div className="focus-card"><div className="focus-tag">{current.tag} · {current.level}</div><p className="focus-text">{current.text}</p><p className="focus-translation">{current.translation}</p><div className="audio-sample"><button className="round-btn" onClick={() => setPlaying(!playing)}>{playing ? <Pause size={18}/> : <Play size={18}/>}</button><div className="sample-wave">{bars.map((h,i) => <i key={i} style={{height: `${h * (playing ? 1.15 : 0.72)}%`}}/> )}</div><span>0:08</span></div></div><div className="record-card"><div className="record-top"><div><span className="label">YOUR RECORDING</span><h3>{recorded ? '录音已保存，听听自己的声音' : '准备好后开始录音'}</h3></div><span className="record-time">{String(Math.floor(seconds / 60)).padStart(2,'0')}:{String(seconds % 60).padStart(2,'0')}</span></div><div className="record-wave">{bars.slice(5,58).map((h,i) => <i key={i} className={recording ? 'live' : ''} style={{height: `${h * (recording ? (0.4 + ((i%5)/7)) : 0.4)}%`}}/> )}</div><div className="record-actions"><button className={recording ? 'record-button recording' : 'record-button'} onClick={startRecord}><span>{recording ? <Pause size={16}/> : <Mic size={16}/>}</span>{recording ? '结束录音' : recorded ? '重新录音' : '开始录音'}</button>{recorded && <button className="secondary" onClick={() => setPlaying(!playing)}>{playing ? <Pause size={15}/> : <Play size={15}/>} 回放</button>}</div></div><div className="tip"><span>练习小贴士</span><p>放慢速度，先把每个音节读清楚，再自然地连起来。</p><RotateCcw size={15}/></div></section>}
+  const [notice, setNotice] = useState<{ kind: 'ok' | 'warn'; text: string } | null>(null);
+
+  // 存档层独立工作：任何变化都持久化，重开页面可接着处理
+  useEffect(() => {
+    saveState({
+      manifestText: state.manifestText,
+      channel: state.channel,
+      delivery: state.delivery,
+      items: state.items,
+      reviews: state.reviews,
+    });
+  }, [state]);
+
+  // 判断层独立工作：条目、交付方式、复核记录任一变化都会重新裁定
+  const assessments = useMemo(
+    () => assessAll(state.items, state.delivery, state.reviews),
+    [state.items, state.delivery, state.reviews],
+  );
+
+  const selected =
+    assessments.find(a => a.item.id === selectedId) ??
+    (filter === 'all' ? assessments[0] : undefined);
+
+  const counts = useMemo(() => {
+    const c = { all: assessments.length, pass: 0, review: 0, blocked: 0 };
+    assessments.forEach(a => {
+      c[a.finalStatus] += 1;
+    });
+    return c;
+  }, [assessments]);
+
+  const exportable = canExport(assessments);
+
+  const analyze = (text: string, channel: Channel) => {
+    const result = parseManifest(text);
+    if (result.format === 'empty') {
+      setNotice({ kind: 'warn', text: '清单为空，请粘贴或上传依赖清单后再分析' });
+      return;
+    }
+    const items = buildItems(result.entries, channel, Date.now());
+    setState(s => ({ ...s, manifestText: text, channel, items }));
+    setSelectedId(items[0]?.id ?? null);
+    const skippedNote = result.skipped.length
+      ? `，${result.skipped.length} 行无法识别已跳过`
+      : '';
+    const channelNote = `（渠道：${channel}，同包换渠道需重新判断）`;
+    setNotice({
+      kind: 'ok',
+      text: `分析完成，共 ${items.length} 个条目${skippedNote}${channelNote}`,
+    });
+  };
+
+  const saveReview = (id: string, record: Omit<ReviewRecord, 'updatedAt'>) => {
+    const full: ReviewRecord = { ...record, updatedAt: new Date().toLocaleString('zh-CN') };
+    setState(s => ({ ...s, reviews: { ...s.reviews, [id]: full } }));
+    setNotice({
+      kind: 'ok',
+      text: `复核记录已随条目保存：${record.decision === 'approved' ? '人工放行' : '人工驳回'}`,
+    });
+  };
+
+  const resetDemo = () => {
+    clearState();
+    const items = buildItems(parseManifest(SEED_MANIFEST).entries, 'npm', Date.now());
+    setState({
+      manifestText: SEED_MANIFEST,
+      channel: 'npm',
+      delivery: 'proprietary-distribution',
+      items,
+      reviews: {},
+      updatedAt: '',
+    });
+    setSelectedId(items[0]?.id ?? null);
+    setFilter('all');
+    setQuery('');
+    setNotice({ kind: 'ok', text: '已重置为示例数据，复核记录已清空' });
+  };
+
+  const clearAll = () => {
+    clearState();
+    setState({
+      manifestText: '',
+      channel: state.channel,
+      delivery: state.delivery,
+      items: [],
+      reviews: {},
+      updatedAt: '',
+    });
+    setSelectedId(null);
+    setNotice({ kind: 'ok', text: '工作区与本地存档已清空' });
+  };
+
+  const handleExport = () => {
+    if (!exportable) {
+      setNotice({ kind: 'warn', text: exportBlockedReason(assessments) });
+      return;
+    }
+    const md = buildMarkdown(assessments, state.delivery, new Date().toLocaleString('zh-CN'));
+    downloadMarkdown(md);
+    setNotice({ kind: 'ok', text: 'Markdown 报告已导出，逐项含最终结论与裁定来源' });
+  };
+
+  const setDelivery = (delivery: Delivery) => {
+    setState(s => ({ ...s, delivery }));
+    setNotice({ kind: 'ok', text: '交付方式已变更，全部条目按新策略重新裁定' });
+  };
+
+  return (
+    <div className="ll-shell">
+      <header className="ll-topbar">
+        <div className="ll-brand">
+          <div className="ll-logo"><ShieldCheck size={20} /></div>
+          <div>
+            <h1>License Lens</h1>
+            <span>依赖许可证兼容性分析 · 发版安全门禁</span>
+          </div>
+        </div>
+        <div className="ll-policy">
+          <Scale size={15} />
+          <label htmlFor="delivery">交付方式</label>
+          <select
+            id="delivery"
+            value={state.delivery}
+            onChange={e => setDelivery(e.target.value as Delivery)}
+          >
+            <option value="proprietary-distribution">闭源分发交付</option>
+            <option value="saas">SaaS 在线服务</option>
+            <option value="internal">仅内部使用</option>
+          </select>
+        </div>
+        <button
+          className={exportable ? 'll-primary' : 'll-primary ll-primary-disabled'}
+          onClick={handleExport}
+          disabled={!exportable}
+          title={exportable ? '导出 Markdown 报告' : exportBlockedReason(assessments)}
+        >
+          {exportable ? <Download size={15} /> : <Ban size={15} />}
+          导出 Markdown
+        </button>
+      </header>
+
+      {notice && (
+        <div className={`ll-notice ${notice.kind}`} onClick={() => setNotice(null)}>
+          {notice.text}
+        </div>
+      )}
+      {!exportable && assessments.length > 0 && (
+        <div className="ll-gate">
+          <Ban size={14} />
+          发版门禁未通过：{exportBlockedReason(assessments)}。全部条目裁定为通过后才可导出报告。
+        </div>
+      )}
+
+      <div className="ll-layout">
+        <ManifestPanel
+          manifestText={state.manifestText}
+          channel={state.channel}
+          onManifestChange={text => setState(s => ({ ...s, manifestText: text }))}
+          onChannelChange={channel => setState(s => ({ ...s, channel }))}
+          onAnalyze={analyze}
+          onReset={resetDemo}
+          onClear={clearAll}
+        />
+
+        <main className="ll-main">
+          <section className="ll-metrics">
+            <div><small>已分析依赖</small><b>{counts.all}</b></div>
+            <div className="good"><small>兼容通过</small><b>{counts.pass}</b></div>
+            <div className="warn"><small>待人工复核</small><b>{counts.review}</b></div>
+            <div className="bad"><small>阻断</small><b>{counts.blocked}</b></div>
+          </section>
+
+          <div className="ll-workgrid">
+            <ResultsList
+              assessments={assessments}
+              filter={filter}
+              query={query}
+              counts={counts}
+              selectedId={selected?.item.id ?? null}
+              onFilter={setFilter}
+              onQuery={setQuery}
+              onSelect={id => setSelectedId(id)}
+            />
+            <ItemDetail
+              assessment={selected}
+              delivery={state.delivery}
+              onSaveReview={saveReview}
+            />
+          </div>
+        </main>
       </div>
-    </main>{showAdd && <div className="modal-backdrop" onClick={() => setShowAdd(false)}><div className="modal" onClick={e => e.stopPropagation()}><div className="modal-head"><h2>添加练习句子</h2><button className="icon-btn" onClick={() => setShowAdd(false)}>×</button></div><label>英文句子<textarea autoFocus value={newText} onChange={e => setNewText(e.target.value)} placeholder="例如：I can make this happen."/></label><div className="modal-actions"><button className="secondary" onClick={() => setShowAdd(false)}>取消</button><button className="primary" onClick={addPhrase}>加入句子库</button></div></div></div>}
-  </div>;
+    </div>
+  );
 }
